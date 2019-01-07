@@ -12,7 +12,7 @@ boomer 完整地实现了 locust 的通讯协议，运行在 slave 模式下，�
 go get github.com/myzhan/boomer
 ```
 
-### zeromq 支持
+### 编译
 boomer 默认使用 gomq，一个纯 Go 语言实现的 ZeroMQ 客户端。
 
 由于 gomq 还不稳定，可以改用 [goczmq](https://github.com/zeromq/goczmq)。
@@ -36,13 +36,10 @@ go get -u github.com/zeromq/gomq
 ```go
 package main
 
-
-import "github.com/myzhan/boomer"
 import "time"
-
+import "github.com/myzhan/boomer"
 
 func foo(){
-
     start := boomer.Now()
     time.Sleep(100 * time.Millisecond)
     elapsed := boomer.Now() - start
@@ -50,12 +47,10 @@ func foo(){
     /*
     汇报一个成功的结果，实际使用时，根据实际场景，自行判断成功还是失败
     */
-    boomer.Events.Publish("request_success", "http", "foo", elapsed, int64(10))
+    boomer.RecordSuccess("http", "foo", elapsed, int64(10))
 }
 
-
 func bar(){
-
     start := boomer.Now()
     time.Sleep(100 * time.Millisecond)
     elapsed := boomer.Now() - start
@@ -63,12 +58,10 @@ func bar(){
     /*
     汇报一个失败的结果，实际使用时，根据实际场景，自行判断成功还是失败
     */
-    boomer.Events.Publish("request_failure", "udp", "bar", elapsed, "udp error")
+    boomer.RecordFailure("udp", "bar", elapsed, "udp error")
 }
 
-
 func main(){
-
     task1 := &boomer.Task{
         Weight: 10,
         Fn: foo,
@@ -81,7 +74,6 @@ func main(){
 
     // 连接到 master，等待页面上下发指令，支持多个 Task
     boomer.Run(task1, task2)
-
 }
 ```
 
@@ -94,7 +86,9 @@ go build -o a.out main.go
 ./a.out --run-tasks foo,bar
 ```
 
-限制单个 boomer 实例的最高 RPS，在一些指定 RPS 的场景下使用。
+--max-rps 表示一秒内所有 Task.Fn 函数能被调用的最多次数。
+
+下面这种情况，如果在同一个 Task.Fn 函数里面多次调用 boomer.RecordSuccess()，那么统计到的 RPS 会超过 10000。
 
 ```bash
 go build -o a.out main.go
@@ -112,25 +106,50 @@ go build -o a.out main.go
 ./a.out --request-increase-rate 10/1m
 ```
 
-如果 master 使用 zeromq。
-
-```bash
-locust -f dummy.py --master --master-bind-host=127.0.0.1 --master-bind-port=5557
-go build -o a.out main.go
-./a.out --master-host=127.0.0.1 --master-port=5557 --rpc=zeromq
-```
-
-如果 master 使用 TCP Socket。
-
-```bash
-locust -f dummy.py --master --master-bind-host=127.0.0.1 --master-bind-port=5557
-go build -o a.out main.go
-./a.out --master-host=127.0.0.1 --master-port=5557 --rpc=socket
-```
-
 locust 启动时，需要一个 locustfile，随便一个符合它要求的即可，这里提供了一个 dummy.py。
 
 由于我们实际上使用 boomer 来施压，这个文件并不会影响到测试。
+
+## 调优
+
+如果你觉得压测工具有性能问题，可以使用内置的 pprof 来获取运行时的 CPU 和内存信息，进行排查和调优。
+
+虽然支持，但是不建议同时运行 CPU 和内存信息采样。
+
+### CPU 调优
+
+```bash
+# 1. 启动 locust。
+# 2. 启动 boomer，进行 30 秒的 CPU 信息采样。
+$ go run main.go -cpu-profile cpu.pprof -cpu-profile-duration 30s
+# 3. 在 Web 界面上启动测试。
+# 4. 运行 pprof。
+$ go tool pprof cpu.pprof
+Type: cpu
+Time: Nov 14, 2018 at 8:04pm (CST)
+Duration: 30.17s, Total samples = 12.07s (40.01%)
+Entering interactive mode (type "help" for commands, "o" for options)
+(pprof) web
+```
+
+### 内存调优
+
+```bash
+# 1. 启动 locust。
+# 2. 启动 boomer，进行 30 秒的内存信息采样。
+$ go run main.go -mem-profile mem.pprof -mem-profile-duration 30s
+# 3. 在 Web 界面上启动测试。
+# 4. 运行 pprof。
+$ go tool pprof -alloc_space mem.pprof
+Type: alloc_space
+Time: Nov 14, 2018 at 8:26pm (CST)
+Entering interactive mode (type "help" for commands, "o" for options)
+(pprof) top
+```
+
+## 贡献
+
+欢迎给 boomer 提交 PR，无论是新增功能或者是补充使用例子。
 
 ## License
 

@@ -3,11 +3,10 @@ package boomer
 import (
 	"fmt"
 	"log"
+	"os"
 	"runtime/debug"
 	"sync/atomic"
 	"time"
-	"os"
-	"math"
 )
 
 const (
@@ -15,6 +14,7 @@ const (
 	stateHatching = "hatching"
 	stateRunning  = "running"
 	stateStopped  = "stopped"
+	stateQuitting = "quitting"
 )
 
 const (
@@ -22,8 +22,7 @@ const (
 )
 
 // Task is like locust's task.
-// when boomer receive start message, it will spawn several
-// goroutines to run Task.Fn .
+// when boomer receive start message, it will spawn several goroutines to run Task.Fn.
 type Task struct {
 	Weight int
 	Fn     func()
@@ -31,13 +30,39 @@ type Task struct {
 }
 
 type runner struct {
-	tasks       []*Task
-	numClients  int32
-	hatchRate   int
-	stopChannel chan bool
-	state       string
-	client      client
-	nodeID      string
+	tasks            []*Task
+	numClients       int32
+	hatchRate        int
+	stopChannel      chan bool
+	shutdownSignal   chan bool
+	state            string
+	masterHost       string
+	masterPort       int
+	client           client
+	nodeID           string
+	hatchType        string
+	rateLimiter      rateLimiter
+	rateLimitEnabled bool
+}
+
+func newRunner(tasks []*Task, rateLimiter rateLimiter, hatchType string) (r *runner) {
+	r = &runner{
+		tasks:     tasks,
+		hatchType: hatchType,
+	}
+	r.nodeID = getNodeID()
+	r.shutdownSignal = make(chan bool)
+
+	if rateLimiter != nil {
+		r.rateLimitEnabled = true
+		r.rateLimiter = rateLimiter
+	}
+
+	if hatchType != "asap" && hatchType != "smooth" {
+		log.Fatalf("Wrong hatch-type, expected asap or smooth, was %s\n", hatchType)
+	}
+
+	return r
 }
 
 func (r *runner) safeRun(fn func()) {
@@ -45,15 +70,18 @@ func (r *runner) safeRun(fn func()) {
 		// don't panic
 		err := recover()
 		if err != nil {
-			debug.PrintStack()
-			Events.Publish("request_failure", "unknown", "panic", 0.0, fmt.Sprintf("%v", err))
+			stackTrace := debug.Stack()
+			errMsg := fmt.Sprintf("%v", err)
+			os.Stderr.Write([]byte(errMsg))
+			os.Stderr.Write([]byte("\n"))
+			os.Stderr.Write(stackTrace)
+			RecordFailure("unknown", "panic", int64(0), errMsg)
 		}
 	}()
 	fn()
 }
 
 func (r *runner) spawnGoRoutines(spawnCount int, quit chan bool) {
-
 	log.Println("Hatching and swarming", spawnCount, "clients at the rate", r.hatchRate, "clients/s...")
 
 	weightSum := 0
@@ -62,7 +90,6 @@ func (r *runner) spawnGoRoutines(spawnCount int, quit chan bool) {
 	}
 
 	for _, task := range r.tasks {
-
 		percent := float64(task.Weight) / float64(weightSum)
 		amount := int(round(float64(spawnCount)*percent, .5, 0))
 
@@ -76,9 +103,12 @@ func (r *runner) spawnGoRoutines(spawnCount int, quit chan bool) {
 				// quit hatching goroutine
 				return
 			default:
-				if i%r.hatchRate == 0 {
+				if r.hatchType == "smooth" {
+					time.Sleep(time.Duration(1000000/r.hatchRate) * time.Microsecond)
+				} else if i%r.hatchRate == 0 {
 					time.Sleep(1 * time.Second)
 				}
+
 				atomic.AddInt32(&r.numClients, 1)
 				go func(fn func()) {
 					for {
@@ -86,12 +116,9 @@ func (r *runner) spawnGoRoutines(spawnCount int, quit chan bool) {
 						case <-quit:
 							return
 						default:
-							if rpsControlEnabled {
-								token := atomic.AddInt64(&rpsThreshold, -1)
-								if token < 0 {
-									// RPS threshold is reached, wait until next second
-									<-rpsControlChannel
-								} else {
+							if r.rateLimitEnabled {
+								blocked := r.rateLimiter.acquire()
+								if !blocked {
 									r.safeRun(fn)
 								}
 							} else {
@@ -101,30 +128,15 @@ func (r *runner) spawnGoRoutines(spawnCount int, quit chan bool) {
 					}
 				}(task.Fn)
 			}
-
 		}
-
 	}
 
 	r.hatchComplete()
-
 }
 
 func (r *runner) startHatching(spawnCount int, hatchRate int) {
-
-	if r.state != stateRunning && r.state != stateHatching {
-		clearStatsChannel <- true
-		r.stopChannel = make(chan bool)
-	}
-
-	if r.state == stateRunning || r.state == stateHatching {
-		// stop previous goroutines without blocking
-		// those goroutines will exit when r.safeRun returns
-		close(r.stopChannel)
-	}
-
+	defaultStats.clearStatsChannel <- true
 	r.stopChannel = make(chan bool)
-	r.state = stateHatching
 
 	r.hatchRate = hatchRate
 	r.numClients = 0
@@ -132,135 +144,136 @@ func (r *runner) startHatching(spawnCount int, hatchRate int) {
 }
 
 func (r *runner) hatchComplete() {
-
 	data := make(map[string]interface{})
 	data["count"] = r.numClients
-	toMaster <- newMessage("hatch_complete", data, r.nodeID)
-
-	r.state = stateRunning
+	r.client.sendChannel() <- newMessage("hatch_complete", data, r.nodeID)
 }
 
 func (r *runner) onQuiting() {
-	toMaster <- newMessage("quit", nil, r.nodeID)
+	if r.state != stateQuitting {
+		r.client.sendChannel() <- newMessage("quit", nil, r.nodeID)
+	}
 }
 
 func (r *runner) stop() {
-
-	if r.state == stateRunning || r.state == stateHatching {
-		close(r.stopChannel)
-		r.state = stateStopped
-		log.Println("Recv stop message from master, all the goroutines are stopped")
+	// stop previous goroutines without blocking
+	// those goroutines will exit when r.safeRun returns
+	close(r.stopChannel)
+	if r.rateLimitEnabled {
+		r.rateLimiter.stop()
 	}
 
+	// publish the boomer stop event
+	// user's code can subscribe to this event and do thins like cleaning up
+	Events.Publish("boomer:stop")
 }
 
-func (r *runner) listener() {
-	for {
-		msg := <-fromMaster
+func (r *runner) close() {
+	if r.client != nil {
+		r.client.close()
+	}
+	close(r.shutdownSignal)
+}
+
+func (r *runner) onHatchMessage(msg *message) {
+	r.client.sendChannel() <- newMessage("hatching", nil, r.nodeID)
+	rate, _ := msg.Data["hatch_rate"]
+	clients, _ := msg.Data["num_clients"]
+	hatchRate := int(rate.(float64))
+	workers := 0
+	if _, ok := clients.(uint64); ok {
+		workers = int(clients.(uint64))
+	} else {
+		workers = int(clients.(int64))
+	}
+	if workers == 0 || hatchRate == 0 {
+		log.Printf("Invalid hatch message from master, num_clients is %d, hatch_rate is %d\n",
+			workers, hatchRate)
+	} else {
+		if r.rateLimitEnabled {
+			r.rateLimiter.start()
+		}
+		r.startHatching(workers, hatchRate)
+	}
+}
+
+// Runner acts as a state machine, and runs in one goroutine without any lock.
+func (r *runner) onMessage(msg *message) {
+	if msg.Type == "quit" {
+		log.Println("Got quit message from master, shutting down...")
+		r.state = stateQuitting
+		Events.Publish("boomer:quit")
+		os.Exit(0)
+	}
+
+	switch r.state {
+	case stateInit:
+		if msg.Type == "hatch" {
+			r.state = stateHatching
+			r.onHatchMessage(msg)
+			r.state = stateRunning
+		}
+	case stateHatching:
+		fallthrough
+	case stateRunning:
 		switch msg.Type {
 		case "hatch":
-			toMaster <- newMessage("hatching", nil, r.nodeID)
-			rate, _ := msg.Data["hatch_rate"]
-			clients, _ := msg.Data["num_clients"]
-			hatchRate := int(rate.(float64))
-			workers := 0
-			if _, ok := clients.(uint64); ok {
-				workers = int(clients.(uint64))
-			} else {
-				workers = int(clients.(int64))
-			}
-			if workers == 0 || hatchRate == 0 {
-				log.Printf("Invalid hatch message from master, num_clients is %d, hatch_rate is %d\n",
-					workers, hatchRate)
-			} else {
-				if rpsControlEnabled {
-					startRPSController()
-				}
-				r.startHatching(workers, hatchRate)
-			}
+			r.state = stateHatching
+			r.stop()
+			r.onHatchMessage(msg)
+			r.state = stateRunning
 		case "stop":
 			r.stop()
-			if rpsControlEnabled {
-				stopRPSController()
-			}
-			toMaster <- newMessage("client_stopped", nil, r.nodeID)
-			toMaster <- newMessage("client_ready", nil, r.nodeID)
-		case "quit":
-			log.Println("Got quit message from master, shutting down...")
-			os.Exit(0)
+			r.state = stateStopped
+			log.Println("Recv stop message from master, all the goroutines are stopped")
+			r.client.sendChannel() <- newMessage("client_stopped", nil, r.nodeID)
+			r.client.sendChannel() <- newMessage("client_ready", nil, r.nodeID)
+		}
+	case stateStopped:
+		if msg.Type == "hatch" {
+			r.state = stateHatching
+			r.onHatchMessage(msg)
+			r.state = stateRunning
 		}
 	}
 }
 
-func startBucketUpdater() {
+func (r *runner) startListener() {
 	go func() {
 		for {
 			select {
-			case <- rpsControllerQuitChannel:
+			case msg := <-r.client.recvChannel():
+				r.onMessage(msg)
+			case <-r.shutdownSignal:
 				return
-			default:
-				atomic.StoreInt64(&rpsThreshold, currentRPSThreshold)
-				time.Sleep(1 * time.Second)
-				// use channel to broadcast
-				close(rpsControlChannel)
-				rpsControlChannel = make(chan bool)
 			}
 		}
 	}()
-}
-
-func startRPSController() {
-	rpsControllerQuitChannel = make(chan bool)
-	go func() {
-		for {
-			select {
-			case <- rpsControllerQuitChannel:
-				return
-			default:
-				if requestIncreaseStep > 0 {
-					currentRPSThreshold = currentRPSThreshold + requestIncreaseStep
-					if currentRPSThreshold < 0 {
-						// int64 overflow
-						currentRPSThreshold = int64(math.MaxInt64)
-					}
-					if maxRPS > 0 && currentRPSThreshold > maxRPS {
-						currentRPSThreshold = maxRPS
-					}
-				} else {
-					if maxRPS > 0 {
-						currentRPSThreshold = maxRPS
-					}
-				}
-				time.Sleep(requestIncreaseInterval)
-			}
-		}
-	}()
-	startBucketUpdater()
-}
-
-func stopRPSController() {
-	close(rpsControllerQuitChannel)
 }
 
 func (r *runner) getReady() {
-
 	r.state = stateInit
+	r.client = newClient(r.masterHost, r.masterPort)
+	r.client.connect()
 
 	// listen to master
-	go r.listener()
+	r.startListener()
 
 	// tell master, I'm ready
-	toMaster <- newMessage("client_ready", nil, r.nodeID)
+	r.client.sendChannel() <- newMessage("client_ready", nil, r.nodeID)
 
 	// report to master
 	go func() {
 		for {
 			select {
-			case data := <-messageToRunner:
+			case data := <-defaultStats.messageToRunner:
 				data["user_count"] = r.numClients
-				toMaster <- newMessage("stats", data, r.nodeID)
+				r.client.sendChannel() <- newMessage("stats", data, r.nodeID)
+			case <-r.shutdownSignal:
+				return
 			}
 		}
 	}()
 
+	Events.Subscribe("boomer:quit", r.onQuiting)
 }

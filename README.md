@@ -11,6 +11,7 @@ Boomer is a better load generator for locust, written in golang. It can spawn th
 
 It will listen and report to the locust master automatically, your test results will be displayed on the master's web UI.
 
+Use it as a library, not a general-purpose benchmarking tool.
 
 ## Install
 
@@ -18,11 +19,11 @@ It will listen and report to the locust master automatically, your test results 
 go get github.com/myzhan/boomer
 ```
 
-### Zeromq support
+### Build
 
-Boomer use gomq by default, which is a pure Go implementation of the ZeroMQ.
+Boomer use [gomq](https://github.com/zeromq/gomq) by default, which is a pure Go implementation of the ZeroMQ protocol.
 
-Becase of the instability of gomq, you can switch to [goczmq](https://github.com/zeromq/goczmq).
+Because of the instability of gomq, you can switch to [goczmq](https://github.com/zeromq/goczmq).
 
 ```bash
 # use gomq
@@ -31,25 +32,22 @@ go build -o a.out main.go
 go build -tags 'goczmq' -o a.out main.go
 ```
 
-If you fail to compile boomer with gomq, try to update gomq fisrt.
+If you fail to compile boomer with gomq, try to update gomq first.
 
 ```bash
 go get -u github.com/zeromq/gomq
 ```
 
 ## Examples(main.go)
-This is a example of boomer's API. You can find more in "examples" directory.
+This is a example of boomer's API. You can find more in the "examples" directory.
 
 ```go
 package main
 
-
-import "github.com/myzhan/boomer"
 import "time"
-
+import "github.com/myzhan/boomer"
 
 func foo(){
-
     start := boomer.Now()
     time.Sleep(100 * time.Millisecond)
     elapsed := boomer.Now() - start
@@ -58,12 +56,10 @@ func foo(){
     Report your test result as a success, if you write it in locust, it will looks like this
     events.request_success.fire(request_type="http", name="foo", response_time=100, response_length=10)
     */
-    boomer.Events.Publish("request_success", "http", "foo", elapsed, int64(10))
+    boomer.RecordSuccess("http", "foo", elapsed, int64(10))
 }
 
-
 func bar(){
-
     start := boomer.Now()
     time.Sleep(100 * time.Millisecond)
     elapsed := boomer.Now() - start
@@ -72,12 +68,10 @@ func bar(){
     Report your test result as a failure, if you write it in locust, it will looks like this
     events.request_failure.fire(request_type="udp", name="bar", response_time=100, exception=Exception("udp error"))
     */
-    boomer.Events.Publish("request_failure", "udp", "bar", elapsed, "udp error")
+    boomer.RecordFailure("udp", "bar", elapsed, "udp error")
 }
 
-
 func main(){
-
     task1 := &boomer.Task{
         Name: "foo",
         Weight: 10,
@@ -91,11 +85,10 @@ func main(){
     }
 
     boomer.Run(task1, task2)
-
 }
 ```
 
-## Usage
+## Run
 
 For debug purpose, you can run tasks without connecting to the master.
 
@@ -104,7 +97,9 @@ go build -o a.out main.go
 ./a.out --run-tasks foo,bar
 ```
 
-If you want to limit max RPS that a single instance of boomer can generate.
+--max-rps means the max count that all the Task.Fn can be called in one second.
+
+The result may be misleading if you call boomer.RecordSuccess() more than once in Task.Fn.
 
 ```bash
 go build -o a.out main.go
@@ -122,25 +117,48 @@ go build -o a.out main.go
 ./a.out --request-increase-rate 10/1m
 ```
 
-If master is listening on zeromq socket.
-
-```bash
-locust -f dummy.py --master --master-bind-host=127.0.0.1 --master-bind-port=5557
-go build -o a.out main.go
-./a.out --master-host=127.0.0.1 --master-port=5557 --rpc=zeromq
-```
-
-If master is listening on tcp socket.
-
-```bash
-locust -f dummy.py --master --master-bind-host=127.0.0.1 --master-bind-port=5557
-go build -o a.out main.go
-./a.out --master-host=127.0.0.1 --master-port=5557 --rpc=socket
-```
-
 So far, dummy.py is necessary when starting a master, because locust needs such a file.
 
 Don't worry, dummy.py has nothing to do with your test.
+
+## Profiling
+
+You may think there are bottlenecks in your load generator, don't hesitate to do profiling.
+
+Both CPU and memory profiling are supported.
+
+It's not suggested to run CPU profiling and memory profiling at the same time.
+
+### CPU Profiling
+
+```bash
+# 1. run locust master.
+# 2. run boomer with cpu profiling for 30 seconds.
+$ go run main.go -cpu-profile cpu.pprof -cpu-profile-duration 30s
+# 3. start test in the WebUI.
+# 4. run pprof.
+$ go tool pprof cpu.pprof
+Type: cpu
+Time: Nov 14, 2018 at 8:04pm (CST)
+Duration: 30.17s, Total samples = 12.07s (40.01%)
+Entering interactive mode (type "help" for commands, "o" for options)
+(pprof) web
+```
+
+### Memory Profiling
+
+```bash
+# 1. run locust master.
+# 2. run boomer with memory profiling for 30 seconds.
+$ go run main.go -mem-profile mem.pprof -mem-profile-duration 30s
+# 3. start test in the WebUI.
+# 4. run pprof and try 'go tool pprof --help' to learn more.
+$ go tool pprof -alloc_space mem.pprof
+Type: alloc_space
+Time: Nov 14, 2018 at 8:26pm (CST)
+Entering interactive mode (type "help" for commands, "o" for options)
+(pprof) top
+```
 
 ## Contributing
 
