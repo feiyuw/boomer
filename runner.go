@@ -24,9 +24,10 @@ const (
 // Task is like locust's task.
 // when boomer receive start message, it will spawn several goroutines to run Task.Fn.
 type Task struct {
-	Weight int
-	Fn     func()
-	Name   string
+	Weight  int
+	Fn      func()
+	OnStart func()
+	Name    string
 }
 
 type runner struct {
@@ -140,6 +141,9 @@ func (r *runner) startHatching(spawnCount int, hatchRate int) {
 
 	r.hatchRate = hatchRate
 	r.numClients = 0
+	for _, task := range r.tasks {
+		task.OnStart()
+	}
 	go r.spawnGoRoutines(spawnCount, r.stopChannel)
 }
 
