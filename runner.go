@@ -27,6 +27,7 @@ type Task struct {
 	Weight  int
 	Fn      func()
 	OnStart func()
+	OnStop  func()
 	Name    string
 }
 
@@ -165,6 +166,10 @@ func (r *runner) stop() {
 	close(r.stopChannel)
 	if r.rateLimitEnabled {
 		r.rateLimiter.stop()
+	}
+
+	for _, task := range r.tasks {
+		task.OnStop()
 	}
 
 	// publish the boomer stop event

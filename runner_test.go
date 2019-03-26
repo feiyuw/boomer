@@ -15,14 +15,18 @@ func TestSafeRun(t *testing.T) {
 
 func TestSpawnGoRoutines(t *testing.T) {
 	taskA := &Task{
-		Weight: 10,
+		Weight:  10,
+		OnStart: func() {},
+		OnStop:  func() {},
 		Fn: func() {
 			time.Sleep(time.Second)
 		},
 		Name: "TaskA",
 	}
 	taskB := &Task{
-		Weight: 20,
+		Weight:  20,
+		OnStart: func() {},
+		OnStop:  func() {},
 		Fn: func() {
 			time.Sleep(2 * time.Second)
 		},
@@ -44,7 +48,9 @@ func TestSpawnGoRoutines(t *testing.T) {
 
 func TestSpawnGoRoutinesSmoothly(t *testing.T) {
 	taskA := &Task{
-		Weight: 10,
+		Weight:  10,
+		OnStart: func() {},
+		OnStop:  func() {},
 		Fn: func() {
 			time.Sleep(time.Second)
 		},
@@ -69,11 +75,15 @@ func TestSpawnGoRoutinesSmoothly(t *testing.T) {
 
 func TestHatchAndStop(t *testing.T) {
 	taskA := &Task{
+		OnStart: func() {},
+		OnStop:  func() {},
 		Fn: func() {
 			time.Sleep(time.Second)
 		},
 	}
 	taskB := &Task{
+		OnStart: func() {},
+		OnStop:  func() {},
 		Fn: func() {
 			time.Sleep(2 * time.Second)
 		},
@@ -119,6 +129,8 @@ func TestHatchAndStop(t *testing.T) {
 
 func TestStop(t *testing.T) {
 	taskA := &Task{
+		OnStart: func() {},
+		OnStop:  func() {},
 		Fn: func() {
 			time.Sleep(time.Second)
 		},
@@ -143,11 +155,15 @@ func TestStop(t *testing.T) {
 
 func TestOnMessage(t *testing.T) {
 	taskA := &Task{
+		OnStart: func() {},
+		OnStop:  func() {},
 		Fn: func() {
 			time.Sleep(time.Second)
 		},
 	}
 	taskB := &Task{
+		OnStart: func() {},
+		OnStop:  func() {},
 		Fn: func() {
 			time.Sleep(2 * time.Second)
 		},
